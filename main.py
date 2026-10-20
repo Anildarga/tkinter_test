@@ -20,9 +20,9 @@ from update_core import UpdateError, verify_manifest
 from update_public_key import PUBLIC_KEY_B64
 
 APP_NAME = "SampleApp"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 # APP_MESSAGE = "Signed, staged updates for the whole application folder."
-APP_MESSAGE = "Signed, update testing."
+APP_MESSAGE = "Signed, testing the update 2nd time with application changes."
 MANIFEST_URL = "https://anildarga.github.io/tkinter_test/latest.json"
 REQUEST_TIMEOUT = 20
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
