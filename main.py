@@ -14,8 +14,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 APP_NAME = "SampleApp"
-APP_VERSION = "1.0.1"
-APP_MESSAGE = "Online updater test - Version 2"
+APP_VERSION = "1.0.2"
+APP_MESSAGE = "Online updater test - Version 3"
 GITHUB_REPOSITORY = "Anildarga/tkinter_test"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 REQUEST_TIMEOUT = 20
