@@ -1,0 +1,79 @@
+name: Build and publish signed release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build and signing dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Build the onedir application and updater
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          $version = $env:RELEASE_VERSION.Substring(1)
+          .\build.ps1 -ReleaseVersion $version
+      - name: Prepare package and sign manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          UPDATE_SIGNING_KEY_B64: ${{ secrets.UPDATE_SIGNING_KEY_B64 }}
+          UPDATE_SIGNING_PASSPHRASE: ${{ secrets.UPDATE_SIGNING_PASSPHRASE }}
+        run: |
+          if (-not $env:UPDATE_SIGNING_KEY_B64 -or -not $env:UPDATE_SIGNING_PASSPHRASE) {
+            throw "Configure UPDATE_SIGNING_KEY_B64 and UPDATE_SIGNING_PASSPHRASE repository secrets."
+          }
+          $version = $env:RELEASE_TAG.Substring(1)
+          $releaseDir = Join-Path $PWD "dist-modern\release"
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          python prepare_release.py --version $version --minimum-version 1.0.0 `
+            --notes "SampleApp $env:RELEASE_TAG" --repository "${{ github.repository }}" `
+            --app-dir ".\dist-modern\SampleApp" --output-dir $releaseDir
+          $keyPath = Join-Path $env:RUNNER_TEMP "sampleapp-signing-key.pem"
+          try {
+            [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String($env:UPDATE_SIGNING_KEY_B64))
+            python sign_manifest.py --private-key $keyPath `
+              --input (Join-Path $releaseDir "latest-unsigned.json") `
+              --output (Join-Path $releaseDir "latest.json")
+          }
+          finally {
+            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+          }
+          New-Item -ItemType Directory -Path ".\site" -Force | Out-Null
+          Copy-Item (Join-Path $releaseDir "latest.json") ".\site\latest.json" -Force
+          Set-Content -Path ".\site\.nojekyll" -Value "" -NoNewline
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SampleApp ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist-modern/release/SampleApp-*.zip
+            dist-modern/release/SampleApp-*.zip.sha256
+            dist-modern/release/latest.json
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy signed manifest to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

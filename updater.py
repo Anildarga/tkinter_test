@@ -1,4 +1,4 @@
-import ctypes
+import argparse
 import os
 import shutil
 import subprocess
@@ -7,13 +7,18 @@ import time
 import uuid
 from pathlib import Path
 
+from update_core import UpdateError, extract_update, sha256_file
+
 PROCESS_SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x00000000
 WAIT_TIMEOUT = 0x00000102
 ERROR_INVALID_PARAMETER = 87
+BACKUP_PREFIX = "SampleApp.backup-"
 
 
 def wait_for_process(pid):
+    import ctypes
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
     kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -39,78 +44,114 @@ def wait_for_process(pid):
         kernel32.CloseHandle(handle)
 
 
-def replace_when_unlocked(source, destination):
-    deadline = time.monotonic() + 10
-    while True:
-        try:
-            os.replace(source, destination)
-            return
-        except PermissionError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.2)
+def remove_old_backups(parent, keep):
+    for candidate in Path(parent).glob(f"{BACKUP_PREFIX}*"):
+        if candidate == keep or not candidate.is_dir() or candidate.is_symlink():
+            continue
+        if candidate.parent.resolve() == Path(parent).resolve():
+            shutil.rmtree(candidate)
 
 
-def install_update(target, downloaded, pid):
-    target = Path(target).resolve()
-    downloaded = Path(downloaded).resolve()
-
-    if not target.is_file():
-        raise FileNotFoundError(f"Installed executable not found: {target}")
-    if not downloaded.is_file():
-        raise FileNotFoundError(f"Update executable not found: {downloaded}")
-    if target.suffix.lower() != ".exe" or downloaded.suffix.lower() != ".exe":
-        raise ValueError("Both files must be Windows .exe files.")
-    if target == downloaded:
-        raise ValueError("The update file must be separate from the installed app.")
+def install_update(app_dir, archive, pid, app_executable, expected_sha256):
+    app_dir = Path(app_dir).resolve()
+    archive = Path(archive).resolve()
+    parent = app_dir.parent
+    if not app_dir.is_dir():
+        raise FileNotFoundError(f"Installed application folder not found: {app_dir}")
+    if not archive.is_file():
+        raise FileNotFoundError(f"Update package not found: {archive}")
+    if app_dir == parent or app_dir.name != "SampleApp":
+        raise ValueError("Install the app in a folder named SampleApp.")
+    if Path(app_executable).name != app_executable or not app_executable.endswith(
+        ".exe"
+    ):
+        raise ValueError("Application executable must be a filename ending in .exe.")
+    if not expected_sha256 or sha256_file(archive) != expected_sha256.lower():
+        raise UpdateError("Update package SHA-256 verification failed.")
     if pid <= 0:
         raise ValueError("Process ID must be a positive integer.")
 
     wait_for_process(pid)
-
     token = uuid.uuid4().hex
-    staged = target.with_name(f"{target.stem}.new-{token}.exe")
-    backup = target.with_name(f"{target.stem}.backup-{token}.exe")
-    shutil.copy2(downloaded, staged)
-
+    stage = parent / f"SampleApp.new-{token}"
+    backup = parent / f"{BACKUP_PREFIX}{token}"
     try:
-        replace_when_unlocked(target, backup)
-        replace_when_unlocked(staged, target)
-        subprocess.Popen([str(target)], cwd=str(target.parent))
+        extract_update(archive, stage, app_executable)
+        os.replace(app_dir, backup)
+        try:
+            os.replace(stage, app_dir)
+        except Exception:
+            os.replace(backup, app_dir)
+            raise
+
+        launched = subprocess.Popen(
+            [str(app_dir / app_executable)],
+            cwd=str(app_dir),
+            close_fds=True,
+        )
+        time.sleep(3)
+        if launched.poll() is not None:
+            raise RuntimeError(
+                "The updated application exited during startup; restoring backup."
+            )
+        remove_old_backups(parent, backup)
+        print(f"Update installed. Previous version backed up to: {backup}")
     except Exception:
-        if target.exists() and backup.exists():
-            target.unlink()
-        if backup.exists() and not target.exists():
-            os.replace(backup, target)
+        if app_dir.exists() and backup.exists():
+            shutil.rmtree(app_dir)
+        if backup.exists() and not app_dir.exists():
+            os.replace(backup, app_dir)
+            fallback = app_dir / app_executable
+            if fallback.is_file():
+                subprocess.Popen([str(fallback)], cwd=str(app_dir), close_fds=True)
         raise
-
-    print(f"Update installed. Previous version backed up to: {backup}")
-    try:
-        downloaded.unlink()
-        downloaded.parent.rmdir()
-    except OSError as error:
-        print(f"Warning: could not remove downloaded update files: {error}")
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+        try:
+            archive.unlink(missing_ok=True)
+            archive.parent.rmdir()
+        except OSError:
+            pass
 
 
 def main():
-    if len(sys.argv) != 4:
-        print(
-            "Usage: Updater.exe <installed.exe> <new.exe> <process_id>",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+    parser = argparse.ArgumentParser(
+        description="Install a signed, SHA-256-verified SampleApp update package."
+    )
+    parser.add_argument("app_dir")
+    parser.add_argument("archive")
+    parser.add_argument("process_id", type=int)
+    parser.add_argument("app_executable")
+    parser.add_argument("sha256")
+    args = parser.parse_args()
+    install_update(
+        args.app_dir,
+        args.archive,
+        args.process_id,
+        args.app_executable,
+        args.sha256,
+    )
 
-    target, downloaded, pid_text = sys.argv[1:]
-    try:
-        pid = int(pid_text)
-    except ValueError:
-        raise ValueError("Process ID must be an integer.") from None
-    install_update(target, downloaded, pid)
+
+def report_error(message):
+    import ctypes
+
+    ctypes.windll.user32.MessageBoxW(
+        None,
+        message,
+        "SampleApp update failed",
+        0x10,
+    )
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, TimeoutError) as error:
-        print(f"Updater failed: {error}", file=sys.stderr)
+    except (OSError, ValueError, TimeoutError, RuntimeError, UpdateError) as error:
+        message = f"Updater failed: {error}"
+        if sys.stderr and not sys.stderr.closed:
+            print(message, file=sys.stderr)
+        if sys.platform == "win32":
+            report_error(message)
         raise SystemExit(1) from None
